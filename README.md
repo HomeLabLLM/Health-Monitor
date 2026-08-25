@@ -5,6 +5,7 @@ Polls all GPUs in parallel via `libhlml.so` (ctypes) and renders per-port
 and per-GPU-pair bandwidth in a rich TUI.
 
 ![Screenshot](screenshot.png)
+
 ## Requirements
 
 - SynapseAI / habanalabs driver stack providing `/usr/lib/habanalabs/libhlml.so`
