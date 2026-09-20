@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 HERE="$(dirname "$(readlink -f "$0")")"
 export PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}"
-exec "$HERE/.venv/bin/python" -m hl_traf "$@"
+exec "$HERE/.venvmonitor/bin/python" -m hl_traf "$@"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import logging
 
 import typer
@@ -112,12 +113,19 @@ def watch(
 def _default(
     ctx: typer.Context,
     version: bool = typer.Option(False, "--version", "-V", help="Print version and exit"),
+    server: str = typer.Option("http://127.0.0.1:5678", "--server", "-s",
+                               help="Monitoring server to connect to."),
 ) -> None:
     if version:
         console.print(f"hl-traf {__version__}")
         raise typer.Exit(0)
     if ctx.invoked_subcommand is None:
-        _watch("matrix", 0.3, "all", 100.0, 60, None, False, False)
+        # The graph TUI is a client of the server, so the hardware is read
+        # once however many people are watching.  There is deliberately no
+        # direct-device fallback: a second reader slows the server's sweeps
+        # for everyone (236 ms becomes 517 ms with two readers).
+        from .ui.monitor import run
+        raise typer.Exit(run(server))
 
 
 # ---------------------------------------------------------------------- #
@@ -366,3 +374,66 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------- #
+# serve -- the monitoring server
+# ---------------------------------------------------------------------- #
+DEFAULT_DATA_DIR = os.path.expanduser("~/.hl-traf")
+
+
+@app.command(name="serve")
+def serve_cmd(
+    port: int = typer.Option(5678, "--port", "-p", help="TCP port to listen on."),
+    host: str = typer.Option("0.0.0.0", "--bind", help="Address to bind."),
+    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir",
+                                 help="Where the sample and profile databases live."),
+    vllm: list[str] = typer.Option([], "--vllm",
+                                   help="vLLM base URL to scrape; repeatable."),
+    replay: str = typer.Option(None, "--replay", metavar="PATH",
+                               help="Serve an archive read-only; no hardware is "
+                                    "touched and nothing is recorded."),
+    nic: bool = typer.Option(False, "--nic",
+                             help="Also poll the NIC fabric so the matrix "
+                                  "and table views work over JSON."),
+    nic_interval: float = typer.Option(0.5, "--nic-interval",
+                                       help="Seconds between fabric sweeps."),
+    log_file: str = typer.Option(None, "--log-file"),
+    verbose: bool = typer.Option(False, "-v", "--verbose"),
+) -> None:
+    """Run the HTTP server: JSON API for the TUI plus the web UI."""
+    from .serve import serve
+    setup_logging(verbose, log_file)
+    serve(host, port, data_dir, list(vllm), replay, nic, nic_interval)
+
+
+@app.command(name="serve-reset")
+def serve_reset_cmd(
+    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
+) -> None:
+    """Rotate the samples database and begin a fresh recording.
+
+    Nothing is deleted -- the rotated file stays readable and appears in
+    the UI's database switcher.
+    """
+    from .serve import reset
+    moved = reset(data_dir)
+    if moved:
+        console.print(f"rotated to [bold]{os.path.basename(moved)}[/]")
+        console.print("a fresh samples.db starts on the next 'serve'")
+    else:
+        console.print("nothing to rotate")
+
+
+@app.command(name="serve-list")
+def serve_list_cmd(
+    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
+) -> None:
+    """List the sample databases with their time extents."""
+    from .serve import describe
+    rows = describe(data_dir)
+    if not rows:
+        console.print(f"no databases in {data_dir}")
+        return
+    for line in rows:
+        console.print(line)
