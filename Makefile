@@ -59,8 +59,12 @@ deps: $(STAMP)
 # menu and --version show, so it must reflect the checkout actually
 # running.
 build:
-	@printf 'BUILD_HASH = "%s"\nBUILD_DATE = "%s"\n' "$(GIT_HASH)$(GIT_DIRTY)" "$(BUILD_DATE)" > $(PKG)/_build.py
-	@echo "build $(GIT_HASH)$(GIT_DIRTY) $(BUILD_DATE)"
+	@if [ "$(GIT_HASH)" = "unknown" ] && [ -f $(PKG)/_build.py ]; then \
+	  echo "build: no git here; keeping shipped $$(grep -o '"[^"]*"' $(PKG)/_build.py | head -1)"; \
+	else \
+	  printf 'BUILD_HASH = "%s"\nBUILD_DATE = "%s"\n' "$(GIT_HASH)$(GIT_DIRTY)" "$(BUILD_DATE)" > $(PKG)/_build.py; \
+	  echo "build $(GIT_HASH)$(GIT_DIRTY) $(BUILD_DATE)"; \
+	fi
 
 check: $(STAMP)
 	@$(PY) -m compileall -q $(PKG) && echo "compile ok"
