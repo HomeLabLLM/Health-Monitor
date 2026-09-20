@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>health-monitor — first run</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/auth.css">
+</head>
+<body>
+<form class="card" id="f">
+  <h1>health-monitor</h1>
+  <p class="sub">No accounts exist yet. Create the <b>admin</b> account to continue.
+     Further users can be added from the menu or with
+     <code>health-monitor users add</code>.</p>
+  <label>Admin user name<input id="name" value="admin" required autocomplete="username"></label>
+  <label>Password <span class="hint">(8+ characters)</span>
+    <input id="p1" type="password" required minlength="8" autocomplete="new-password" autofocus></label>
+  <label>Repeat password<input id="p2" type="password" required minlength="8" autocomplete="new-password"></label>
+  <div class="msg" id="msg" hidden></div>
+  <button class="primary" type="submit">Create admin and sign in</button>
+  <p class="hint">Lost the admin password later? On the web server box run
+     <code>health-monitor users passwd admin</code>.</p>
+</form>
+<script>
+const f = document.getElementById('f'), msg = document.getElementById('msg');
+f.onsubmit = async (e) => {
+  e.preventDefault();
+  msg.hidden = true;
+  const p1 = document.getElementById('p1').value, p2 = document.getElementById('p2').value;
+  if (p1 !== p2) { msg.textContent = 'passwords do not match'; msg.hidden = false; return; }
+  const r = await fetch('/api/setup', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: document.getElementById('name').value, password: p1 }) });
+  const d = await r.json().catch(() => ({}));
+  if (r.ok) location.href = '/';
+  else { msg.textContent = d.error || ('setup failed (' + r.status + ')'); msg.hidden = false; }
+};
+</script>
+</body>
+</html>

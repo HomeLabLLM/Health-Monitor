@@ -1,57 +1,103 @@
-# health-monitor monitoring server + TUI
+# health-monitor
 #
-# The venv is deliberately this app's own (.venvmonitor).  Do not point
-# any of this at ~/venv3 -- that is the vLLM environment and its torch
-# install is easy to break and slow to rebuild.
+# One venv, .venvhealth, with vendor extras chosen by what is on this box:
+#   NVIDIA  -> nvidia-ml-py from PyPI
+#   AMD     -> amdsmi is a *system* package matched to the driver, so the
+#              venv is created with --system-site-packages on AMD boxes
+#   Gaudi   -> nothing extra (ctypes to libhlml)
+# Never touches any other venv on the box.
 
-VENV    := .venvmonitor
-PY      := $(VENV)/bin/python
-PIP     := $(VENV)/bin/pip
-STAMP   := $(VENV)/.deps-installed
-PORT    ?= 5678
-DATADIR ?= $(HOME)/.health-monitor
-VLLM    ?= http://127.0.0.1:8000
+VENV     := .venvhealth
+PY       := $(VENV)/bin/python
+PIP      := $(VENV)/bin/pip
+STAMP    := $(VENV)/.deps-installed
+PYTHON3  ?= python3
+PKG      := health_monitor
 
-# uv is not installed on this box; plain venv + pip is one less thing to
-# depend on.
-PYTHON3 ?= python3
+HAS_NVIDIA := $(shell command -v nvidia-smi >/dev/null 2>&1 && echo 1)
+HAS_AMD    := $(shell $(PYTHON3) -c "import amdsmi" >/dev/null 2>&1 && echo 1)
+HAS_GAUDI  := $(shell test -e /usr/lib/habanalabs/libhlml.so && echo 1)
+VENV_FLAGS := $(if $(HAS_AMD),--system-site-packages,)
+EXTRAS     := $(if $(HAS_NVIDIA),nvidia-ml-py,)
 
-.PHONY: help venv deps serve tui reset clean check
+GIT_HASH := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+GIT_DIRTY := $(shell git diff --quiet 2>/dev/null || echo -dirty)
+BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+
+.PHONY: help venv deps build monitor manager web tui check clean \
+        install-units enable-units status-units vendors
 
 help:
-	@echo "make serve   - run the monitoring server on port $(PORT)"
-	@echo "make tui     - run the TUI (requires a running server)"
-	@echo "make reset   - rotate the samples database and start a fresh one"
-	@echo "make venv    - create $(VENV) if missing"
-	@echo "make clean   - remove $(VENV)"
+	@echo "targets:"
+	@echo "  make monitor | manager | web | tui   run a role from this checkout"
+	@echo "  make venv                          create $(VENV) with the right vendor extras"
+	@echo "  make build                         write $(PKG)/_build.py (git hash + date)"
+	@echo "  make install-units                 install systemd --user units for the roles"
+	@echo "  make enable-units ROLES=\"monitor\"  enable + start the given roles"
+	@echo "  make check                         compile everything"
 	@echo ""
-	@echo "vars: PORT=$(PORT)  DATADIR=$(DATADIR)  VLLM=$(VLLM)"
+	@echo "detected: nvidia=$(if $(HAS_NVIDIA),yes,no) amd=$(if $(HAS_AMD),yes,no) gaudi=$(if $(HAS_GAUDI),yes,no)"
+	@echo "build:    $(GIT_HASH)$(GIT_DIRTY) $(BUILD_DATE)"
+
+vendors:
+	@echo "nvidia=$(if $(HAS_NVIDIA),yes,no) amd=$(if $(HAS_AMD),yes,no) gaudi=$(if $(HAS_GAUDI),yes,no)"
 
 $(PY):
-	@echo ">> creating $(VENV)"
-	@$(PYTHON3) -m venv $(VENV)
+	@echo ">> creating $(VENV) $(VENV_FLAGS)"
+	@$(PYTHON3) -m venv $(VENV_FLAGS) $(VENV)
 	@$(PIP) install --quiet --upgrade pip
 
 $(STAMP): $(PY) requirements.txt
-	@echo ">> installing dependencies"
-	@$(PIP) install --quiet -r requirements.txt
+	@echo ">> installing dependencies $(if $(EXTRAS),(+ $(EXTRAS)),)"
+	@$(PIP) install --quiet -r requirements.txt $(EXTRAS)
 	@touch $(STAMP)
 
 venv: $(STAMP)
-
 deps: $(STAMP)
 
-serve: $(STAMP)
-	@$(PY) -m health_monitor serve --port $(PORT) --data-dir $(DATADIR) --vllm $(VLLM)
-
-tui: $(STAMP)
-	@$(PY) -m health_monitor --server http://127.0.0.1:$(PORT)
-
-reset: $(STAMP)
-	@$(PY) -m health_monitor serve-reset --data-dir $(DATADIR)
+# The build stamp is generated, never committed: it is what the burger
+# menu and --version show, so it must reflect the checkout actually
+# running.
+build:
+	@printf 'BUILD_HASH = "%s"\nBUILD_DATE = "%s"\n' "$(GIT_HASH)$(GIT_DIRTY)" "$(BUILD_DATE)" > $(PKG)/_build.py
+	@echo "build $(GIT_HASH)$(GIT_DIRTY) $(BUILD_DATE)"
 
 check: $(STAMP)
-	@$(PY) -m compileall -q health_monitor && echo "compile ok"
+	@$(PY) -m compileall -q $(PKG) && echo "compile ok"
+
+monitor: $(STAMP) build
+	@$(PY) -m $(PKG) monitor
+
+manager: $(STAMP) build
+	@$(PY) -m $(PKG) manager
+
+web: $(STAMP) build
+	@$(PY) -m $(PKG) web
+
+tui: $(STAMP)
+	@$(PY) -m $(PKG) tui $(TUI_ARGS)
+
+# ---------------------------------------------------------------------- #
+# systemd --user units.  No root needed; run `loginctl enable-linger $$USER`
+# once (that one needs sudo) so they survive logout and start at boot.
+# ---------------------------------------------------------------------- #
+UNIT_DIR := $(HOME)/.config/systemd/user
+ROLES    ?= monitor
+
+install-units: $(STAMP) build
+	@mkdir -p $(UNIT_DIR)
+	@sed -e 's|@CHECKOUT@|$(CURDIR)|g' deploy/health-monitor@.service > $(UNIT_DIR)/health-monitor@.service
+	@systemctl --user daemon-reload
+	@echo "installed $(UNIT_DIR)/health-monitor@.service"
+	@echo "enable with:  make enable-units ROLES=\"$(ROLES)\""
+	@loginctl show-user $$USER 2>/dev/null | grep -q '^Linger=yes' || \
+	  echo "NOTE: run  sudo loginctl enable-linger $$USER  once, or these stop at logout"
+
+enable-units: install-units
+	@for r in $(ROLES); do systemctl --user enable --now health-monitor@$$r.service && echo "enabled health-monitor@$$r"; done
+
+status-units:
+	@for r in monitor manager web; do systemctl --user is-active health-monitor@$$r.service 2>/dev/null | sed "s/^/$$r: /"; done
 
 clean:
-	rm -rf $(VENV)
+	rm -rf $(VENV) $(PKG)/_build.py

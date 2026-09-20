@@ -48,6 +48,7 @@ class MonitorApp:
         self.engine.on_sample = self._on_sample
         self.engine.on_events = self._on_events
         self._flush_task: asyncio.Task | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._started = time.time()
         self._sweeps_since_status = 0
 
@@ -61,9 +62,12 @@ class MonitorApp:
     def _on_events(self, events) -> None:
         for e in events:
             self.outbox.record_event(self.id, e.kind, e.ts, None, e.detail)
-        # Identity changed: the manager needs the new card list.
-        asyncio.get_event_loop().create_task(
-            self.uplink.send(proto.GPUS, gpus=self.engine.gpus()))
+        # Identity changed: the manager needs the new card list.  This runs
+        # on the engine's executor thread, so hand the send to the loop.
+        loop = self._loop
+        if loop is not None:
+            loop.call_soon_threadsafe(
+                lambda: loop.create_task(self.uplink.send(proto.GPUS, gpus=self.engine.gpus())))
 
     async def _flusher(self) -> None:
         loop = asyncio.get_running_loop()
@@ -162,6 +166,7 @@ class MonitorApp:
 
     # ------------------------------------------------------------------ #
     async def run(self) -> None:
+        self._loop = asyncio.get_running_loop()
         listen = self.cfg["local_listen"]
         host, _, port = listen.rpartition(":")
         runner = web.AppRunner(self.routes(), access_log=None)

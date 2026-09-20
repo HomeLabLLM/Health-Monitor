@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>health-monitor — sign in</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/auth.css">
+</head>
+<body>
+<form class="card" id="f" autocomplete="on">
+  <h1>health-monitor</h1>
+  <p class="sub">Sign in to view GPU health across the fleet.</p>
+  <label>User name<input name="name" id="name" autofocus required autocomplete="username"></label>
+  <label>Password<input name="password" id="password" type="password" required autocomplete="current-password"></label>
+  <div class="msg" id="msg" hidden></div>
+  <button class="primary" type="submit">Sign in</button>
+</form>
+<script>
+const f = document.getElementById('f'), msg = document.getElementById('msg');
+f.onsubmit = async (e) => {
+  e.preventDefault();
+  msg.hidden = true;
+  const r = await fetch('/api/login', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: f.name.value, password: f.password.value }) });
+  const d = await r.json().catch(() => ({}));
+  if (r.ok) {
+    const next = new URLSearchParams(location.search).get('next');
+    location.href = next && next.startsWith('/') ? next : '/';
+  } else {
+    msg.textContent = d.error || ('sign-in failed (' + r.status + ')');
+    msg.hidden = false;
+    f.password.value = '';
+    f.password.focus();
+  }
+};
+</script>
+</body>
+</html>
