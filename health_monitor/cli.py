@@ -1,371 +1,321 @@
-"""typer CLI for hl-traf."""
+"""health-monitor command line.
+
+    health-monitor monitor            run the GPU monitor on this box
+    health-monitor manager            run the manager (mTLS listener)
+    health-monitor web                run the web server (HTTPS, users)
+    health-monitor tui                the terminal UI (client of the web server)
+    health-monitor keys ...           CA, server and client certificates
+    health-monitor users ...          web-server user administration
+    health-monitor gpus ...           this monitor's GPU identity registry
+    health-monitor config ...         show / set config values per role
+    health-monitor reset              rotate the manager's samples database
+"""
 
 from __future__ import annotations
 
-import asyncio
-import os
+import json
 import logging
+import os
+import socket
+import sys
 
 import typer
 from rich.console import Console
 from rich.table import Table
-from rich.text import Text
 
-from . import __version__
-from .hlml import Hlml, HlmlError
+from . import __version__, config
 from .log import setup_logging
-from .topology import TOPOLOGY_FILE, Wiring, discover, wiring_from_qual
-from .ui.live import TuiApp
 
-app = typer.Typer(
-    name="hl-traf",
-    help="Live NIC fabric traffic monitor for Habana Gaudi systems.",
-    add_completion=False,
-    no_args_is_help=False,
-)
+app = typer.Typer(name="health-monitor", add_completion=False, no_args_is_help=True,
+                  help="Multi-vendor GPU health monitoring: monitor, manager, web, TUI.")
+keys_app = typer.Typer(help="Certificate authority and certificates (run on the manager).")
+users_app = typer.Typer(help="Web-server user administration.")
+gpus_app = typer.Typer(help="GPU identity registry on this monitor.")
+config_app = typer.Typer(help="Configuration per role.")
+app.add_typer(keys_app, name="keys")
+app.add_typer(users_app, name="users")
+app.add_typer(gpus_app, name="gpus")
+app.add_typer(config_app, name="config")
 console = Console()
 
 
-def _open_hlml() -> Hlml:
+def _build_info() -> str:
     try:
-        return Hlml()
-    except HlmlError as exc:
-        console.print(f"[bold red]error:[/] {exc}")
-        raise typer.Exit(1)
+        from . import _build
+        return f"{_build.BUILD_HASH} ({_build.BUILD_DATE})"
+    except Exception:                                # noqa: BLE001
+        return "unknown build"
 
 
-def _load_wiring(hlml: Hlml) -> Wiring | None:
-    """Topology cache first, then the qual static map as fallback."""
-    log = logging.getLogger("hl-traf")
-    wiring = Wiring.load()
-    if wiring:
-        log.info("topology: %d links from %s", len(wiring.links), TOPOLOGY_FILE)
-        return wiring
-    try:
-        wiring = wiring_from_qual(hlml)
-        log.info(
-            "topology: static qual map (%d direct links, %d routed) — "
-            "run 'hl-traf discover' to verify with traffic",
-            len(wiring.links), len(wiring.routed_links),
-        )
-        return wiring
-    except (OSError, ValueError) as exc:
-        log.info("topology: no cache and no qual map (%s) — run 'hl-traf discover'", exc)
-        return None
-
-
-# ---------------------------------------------------------------------- #
-# watch (default)
-# ---------------------------------------------------------------------- #
-def _watch(
-    view: str,
-    interval: float,
-    ports: str,
-    line_rate: float,
-    history: int,
-    log_file: str | None,
-    verbose: bool,
-    once: bool,
-) -> None:
-    panel = setup_logging(verbose, log_file)
-    hlml = _open_hlml()
-    try:
-        wiring = _load_wiring(hlml)
-        tui = TuiApp(
-            hlml,
-            wiring,
-            panel,
-            view=view,
-            interval=interval,
-            history=history,
-            ports=ports,
-            line_rate_gbps=line_rate,
-            once=once,
-            width=200 if once else None,
-        )
-        asyncio.run(tui.run())
-    finally:
-        hlml.shutdown()
-
-
-@app.command()
-def watch(
-    view: str = typer.Option("matrix", "--view", "-w", help="matrix | table"),
-    interval: float = typer.Option(0.3, "--interval", "-i", help="Min seconds between sweeps (fast path ~0.2-0.5s)"),
-    ports: str = typer.Option("all", "--ports", help="all | internal | external"),
-    line_rate: float = typer.Option(100.0, "--line-rate", help="NIC line rate in Gb/s for utilization"),
-    history: int = typer.Option(60, "--history", help="Sparkline history length (sweeps)"),
-    log_file: str | None = typer.Option(None, "--log-file", help="Also write logs to this file"),
-    verbose: bool = typer.Option(False, "--verbose", "-v"),
-    once: bool = typer.Option(False, "--once", help="Render one snapshot after priming, then exit"),
-) -> None:
-    """Live monitor (default command)."""
-    if view not in ("matrix", "table"):
-        console.print("[red]--view must be matrix or table[/]")
-        raise typer.Exit(2)
-    if ports not in ("all", "internal", "external"):
-        console.print("[red]--ports must be all, internal or external[/]")
-        raise typer.Exit(2)
-    _watch(view, interval, ports, line_rate, history, log_file, verbose, once)
-
-
-@app.callback(invoke_without_command=True)
-def _default(
-    ctx: typer.Context,
-    version: bool = typer.Option(False, "--version", "-V", help="Print version and exit"),
-    server: str = typer.Option("http://127.0.0.1:5678", "--server", "-s",
-                               help="Monitoring server to connect to."),
-) -> None:
+@app.callback()
+def _root(version: bool = typer.Option(False, "--version", "-V")) -> None:
     if version:
-        console.print(f"hl-traf {__version__}")
+        console.print(f"health-monitor {__version__}  build {_build_info()}")
         raise typer.Exit(0)
-    if ctx.invoked_subcommand is None:
-        # The graph TUI is a client of the server, so the hardware is read
-        # once however many people are watching.  There is deliberately no
-        # direct-device fallback: a second reader slows the server's sweeps
-        # for everyone (236 ms becomes 517 ms with two readers).
-        from .ui.monitor import run
-        raise typer.Exit(run(server))
 
 
 # ---------------------------------------------------------------------- #
-# discover
-# ---------------------------------------------------------------------- #
-@app.command(name="discover")
-def discover_cmd(
-    windows: int = typer.Option(60, "--windows", "-n", help="Number of delta windows to sample"),
-    interval: float = typer.Option(5.0, "--interval", "-i", help="Window length in seconds (>= ~3s sweep time)"),
-    tol: float = typer.Option(0.10, "--tol", help="Relative tx/rx matching tolerance"),
-    floor: float = typer.Option(4096.0, "--floor", help="Min octets/window for a port to count as active"),
-    links_per_pair: int = typer.Option(3, "--links-per-pair", help="Max links per GPU pair (0 = unlimited)"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Save without confirmation"),
-    output: str = typer.Option(TOPOLOGY_FILE, "--output", "-o", help="Topology cache path"),
-    verbose: bool = typer.Option(False, "--verbose", "-v"),
-) -> None:
-    """Discover internal NIC wiring via traffic correlation.
-
-    Needs fabric traffic flowing (e.g. an HCCL collective) while sampling.
-    Bursts can be sparse: default is 60 windows x 5s = 5 minutes.
-    """
-    setup_logging(verbose)
-    hlml = _open_hlml()
-    try:
-        from rich.progress import Progress
-
-        with Progress(console=console, transient=True) as prog:
-            task = prog.add_task("sampling fabric traffic", total=windows)
-
-            def progress(done: int, total: int, active: int) -> None:
-                prog.update(task, completed=done, description=f"window {done}/{total} ({active} active ports)")
-
-            report, meta = discover(
-                hlml,
-                windows=windows,
-                interval=interval,
-                tol=tol,
-                floor_bytes=floor,
-                links_per_pair=links_per_pair or None,
-                progress=progress,
-            )
-
-        tab = Table(title="discovered links", header_style="bold cyan")
-        for col in ("GPU A", "Port A", "GPU B", "Port B", "score"):
-            tab.add_column(col, justify="right" if col != "score" else "left")
-        for lk in sorted(report.wiring.links, key=lambda l: (l.gpu_a, l.port_a)):
-            tab.add_row(str(lk.gpu_a), str(lk.port_a), str(lk.gpu_b), str(lk.port_b), f"{lk.score:.2f}")
-        console.print(tab)
-
-        if meta["total_tx_bytes"] <= 0:
-            console.print(
-                "[bold yellow]warning:[/] no internal NIC traffic observed — "
-                "run a collective (HCCL) workload during discovery."
-            )
-        if report.idle_ports:
-            console.print(f"[yellow]{len(report.idle_ports)} ports idle[/] (no measurable tx): "
-                          + ", ".join(f"G{g}:p{p}" for g, p in report.idle_ports))
-        if report.unmatched_ports:
-            console.print(f"[yellow]{len(report.unmatched_ports)} active ports unmatched[/]: "
-                          + ", ".join(f"G{g}:p{p}" for g, p in report.unmatched_ports))
-
-        if not report.wiring.links:
-            console.print("[red]nothing discovered; not writing cache[/]")
-            raise typer.Exit(1)
-
-        if yes or typer.confirm(f"Save {len(report.wiring.links)} links to {output}?"):
-            report.wiring.save(output)
-            console.print(f"[green]saved[/] {output}")
-    finally:
-        hlml.shutdown()
-
-
-
-
-# ---------------------------------------------------------------------- #
-# ports
+# roles
 # ---------------------------------------------------------------------- #
 @app.command()
-def ports(
-    verbose: bool = typer.Option(False, "--verbose", "-v"),
-) -> None:
-    """One-shot map of ports, link state and netdevs."""
-    setup_logging(verbose)
-    hlml = _open_hlml()
-    wiring = _load_wiring(hlml)
-    try:
-        tab = Table(title="NIC ports", header_style="bold cyan")
-        for col, justify in (
-            ("GPU", "right"), ("port", "right"), ("type", "left"),
-            ("link", "center"), ("peer", "left"), ("netdev", "left"),
-        ):
-            tab.add_column(col, justify=justify)
-        for dev in hlml.devices:
-            for p in dev.ports:
-                try:
-                    up = dev.link_up(p.port)
-                    link_txt = Text("UP", style="green") if up else Text("DOWN", style="grey50")
-                except HlmlError:
-                    link_txt = Text("?", style="red")
-                peer = wiring.peer(dev.index, p.port) if wiring else None
-                if peer:
-                    peer_txt = f"G{peer[0]}:p{peer[1]}"
-                elif wiring and (rp := wiring.routed_peer(dev.index, p.port)):
-                    peer_txt = f"G{rp[0]}:p{rp[1]} (sw r{rp[2]})"
-                else:
-                    peer_txt = "—"
-                tab.add_row(
-                    str(dev.index),
-                    str(p.port),
-                    Text("ext", style="magenta3") if p.external else Text("int", style="grey62"),
-                    link_txt,
-                    peer_txt,
-                    dev.netdev(p.port) or "",
-                )
-        console.print(tab)
-        if wiring:
-            console.print(f"[grey62]topology cache: {TOPOLOGY_FILE} "
-                          f"({len(wiring.links)} links, {wiring.discovered_at})[/]")
-    finally:
-        hlml.shutdown()
+def monitor(config_path: str = typer.Option(None, "--config", "-c"),
+            log_file: str = typer.Option(None, "--log-file"),
+            verbose: bool = typer.Option(False, "-v", "--verbose")) -> None:
+    """Sweep this box's GPUs, spool locally, forward to the manager."""
+    setup_logging(verbose, log_file)
+    from .monitor.app import main
+    main(config_path)
 
 
-# ---------------------------------------------------------------------- #
-# qual-map
-# ---------------------------------------------------------------------- #
-@app.command(name="qual-map")
-def qual_map(
-    save: bool = typer.Option(False, "--save", "-y", help=f"Write to {TOPOLOGY_FILE}"),
-    verbose: bool = typer.Option(False, "--verbose", "-v"),
-) -> None:
-    """Show the static NIC wiring from the qual stack (libNICTests.so).
-
-    Decodes g_card_location_N_mapping tables and maps card locations to
-    this system's GPUs via hlml module IDs. No traffic required.
-    """
-    setup_logging(verbose)
-    hlml = _open_hlml()
-    try:
-        mods = {dev.index: dev.module_id() for dev in hlml.devices}
-        wiring = wiring_from_qual(hlml)
-
-        tab = Table(title="direct internal links (from qual static map)", header_style="bold cyan")
-        for col, j in (("GPU A", "right"), ("Port", "right"), ("GPU B", "right"), ("Port", "right")):
-            tab.add_column(col, justify=j)
-        for lk in sorted(wiring.links, key=lambda l: (l.gpu_a, l.port_a)):
-            tab.add_row(str(lk.gpu_a), str(lk.port_a), str(lk.gpu_b), str(lk.port_b))
-        console.print(tab)
-
-        rtab = Table(title="external ports (routed via switch)", header_style="bold cyan")
-        for col, j in (("GPU A", "right"), ("Port", "right"), ("GPU B", "right"), ("Port", "right"), ("route", "right")):
-            rtab.add_column(col, justify=j)
-        for lk in sorted(wiring.routed_links, key=lambda l: (l.gpu_a, l.port_a)):
-            rtab.add_row(str(lk.gpu_a), str(lk.port_a), str(lk.gpu_b), str(lk.port_b), str(lk.route))
-        console.print(rtab)
-
-        console.print(
-            f"[grey62]module ids: "
-            + ", ".join(f"gpu{i}=m{m}" for i, m in sorted(mods.items()))
-            + f"  |  {len(wiring.links)} direct links, {len(wiring.routed_links)} routed[/]"
-        )
-        if save:
-            wiring.save()
-            console.print(f"[green]saved[/] {TOPOLOGY_FILE}")
-        else:
-            console.print("[grey62]dry run — pass --save to write the topology cache[/]")
-    finally:
-        hlml.shutdown()
-
-
-# ---------------------------------------------------------------------- #
-# selftest (synthetic matcher validation)
-# ---------------------------------------------------------------------- #
 @app.command()
-def selftest(
-    seed: int = typer.Option(1, "--seed"),
-    verbose: bool = typer.Option(False, "--verbose", "-v"),
-) -> None:
-    """Validate the correlation matcher against synthetic counter traces."""
-    import random
+def manager(config_path: str = typer.Option(None, "--config", "-c"),
+            log_file: str = typer.Option(None, "--log-file"),
+            verbose: bool = typer.Option(False, "-v", "--verbose")) -> None:
+    """Accept monitors and web servers over mutual TLS; archive samples."""
+    setup_logging(verbose, log_file)
+    from .manager.app import main
+    main(config_path)
 
-    from .topology import LinkKey, match_correlation
 
-    setup_logging(verbose)
-    rng = random.Random(seed)
-    n_gpu, n_ports, per_pair = 8, 24, 3
-    internal = [p for p in range(n_ports) if p not in (8, 22, 23)]
-    assert len(internal) == 21
+@app.command()
+def web(config_path: str = typer.Option(None, "--config", "-c"),
+        log_file: str = typer.Option(None, "--log-file"),
+        verbose: bool = typer.Option(False, "-v", "--verbose")) -> None:
+    """Serve the web UI over HTTPS; users, profiles, sessions."""
+    setup_logging(verbose, log_file)
+    from .web.app import main
+    main(config_path)
 
-    # Ground truth wiring: 3 links between every GPU pair.
-    truth: dict[LinkKey, LinkKey] = {}
-    pools = {g: list(internal) for g in range(n_gpu)}
-    for a in range(n_gpu):
-        for b in range(a + 1, n_gpu):
-            for _ in range(per_pair):
-                pa = rng.choice(pools[a])
-                pools[a].remove(pa)
-                pb = rng.choice(pools[b])
-                pools[b].remove(pb)
-                truth[(a, pa)] = (b, pb)
-                truth[(b, pb)] = (a, pa)
 
-    windows = 10
-    keys = sorted(truth)
-    tx = {k: [0.0] * windows for k in keys}
-    rx = {k: [0.0] * windows for k in keys}
-    for w in range(windows):
-        for a_k, b_k in truth.items():
-            if a_k >= b_k:
-                continue  # handle each physical link once
-            if rng.random() < 0.25:
-                continue  # quiet window for this link
-            base = rng.uniform(1e6, 5e9)
-            tx[a_k][w] = base
-            tx[b_k][w] = base * rng.uniform(0.2, 1.0)  # asymmetric duplex
-    for w in range(windows):
-        for k in keys:
-            if tx[k][w] > 0:
-                rx[truth[k]][w] += tx[k][w] * rng.uniform(1.010, 1.020)  # wire overhead
+@app.command()
+def tui(server: str = typer.Option("https://127.0.0.1:5678", "--server", "-s"),
+        token: str = typer.Option(None, "--token", envvar="HM_TOKEN"),
+        insecure: bool = typer.Option(False, "--insecure", help="Skip TLS verification.")) -> None:
+    """Terminal UI: a client of the web server."""
+    from .ui.monitor import run
+    raise typer.Exit(run(server, token=token, insecure=insecure))
 
-    report = match_correlation(tx, rx, tol=0.05, floor_bytes=4096.0, links_per_pair=per_pair)
-    got = {lk.normalized() for lk in report.wiring.links}
-    want = set()
-    for a_k, b_k in truth.items():
-        if a_k < b_k:
-            want.add((a_k, b_k))
 
-    missing = want - got
-    extra = got - want
-    ok = not missing and not extra and report.matched == len(want)
-    console.print(f"links truth={len(want)} matched={report.matched} "
-                  f"missing={len(missing)} extra={len(extra)} idle={len(report.idle_ports)}")
-    if ok:
-        console.print("[bold green]SELFTEST PASS[/] — matcher recovered full synthetic wiring")
-    else:
-        for m in sorted(missing)[:10]:
-            console.print(f"  missing: G{m[0][0]}:p{m[0][1]} <-> G{m[1][0]}:p{m[1][1]}")
-        for e in sorted(extra)[:10]:
-            console.print(f"  extra:   G{e[0][0]}:p{e[0][1]} <-> G{e[1][0]}:p{e[1][1]}")
-        console.print("[bold red]SELFTEST FAIL[/]")
+@app.command()
+def reset(config_path: str = typer.Option(None, "--config", "-c")) -> None:
+    """Rotate the manager's samples database and start a fresh one."""
+    from .manager.app import reset as _reset
+    moved = _reset(config_path)
+    console.print(f"rotated to [bold]{os.path.basename(moved)}[/]" if moved else "nothing to rotate")
+
+
+# ---------------------------------------------------------------------- #
+# keys
+# ---------------------------------------------------------------------- #
+@keys_app.command("init-ca")
+def keys_init_ca(name: str = typer.Option("health-monitor CA", "--name"),
+                 certs: str = typer.Option(None, "--certs"),
+                 server_names: list[str] = typer.Option(None, "--server-name",
+                     help="Hostnames/IPs clients use to reach this manager; repeatable. "
+                          "Defaults to this host's name and FQDN."),
+                 force: bool = typer.Option(False, "--force")) -> None:
+    """Create the CA and this manager's server certificate."""
+    from . import keys
+    d = certs or config.certs_dir()
+    names = server_names or sorted({socket.gethostname().split(".")[0], socket.getfqdn()})
+    keys.init_ca(d, name, force=force)
+    keys.new_server(d, names)
+    console.print(f"CA created in {d}\nserver certificate for: {', '.join(names)}")
+
+
+@keys_app.command("new-monitor")
+def keys_new_monitor(name: str = typer.Argument(..., help="Monitor id (its hostname)."),
+                     certs: str = typer.Option(None, "--certs"),
+                     out: str = typer.Option(None, "--out", help="Bundle directory.")) -> None:
+    """Issue a client bundle for one monitor and register it."""
+    _new_client("monitor", name, certs, out)
+
+
+@keys_app.command("new-web")
+def keys_new_web(name: str = typer.Argument("web"),
+                 certs: str = typer.Option(None, "--certs"),
+                 out: str = typer.Option(None, "--out")) -> None:
+    """Issue a client bundle for a web server and register it."""
+    _new_client("web", name, certs, out)
+
+
+def _new_client(role: str, name: str, certs: str | None, out: str | None) -> None:
+    from . import keys
+    d = certs or config.certs_dir()
+    bundle = keys.new_client(d, role, name, bundle_dir=out or os.path.join(d, "bundles"))
+    cfg = config.load("manager")
+    key = "monitors" if role == "monitor" else "web_clients"
+    if name not in cfg.values[key]:
+        cfg.values[key].append(name)
+        cfg.save()
+    console.print(f"bundle: [bold]{bundle}[/]\nregistered {role} [bold]{name}[/] in {cfg.path}\n"
+                  f"install on {name} with:  health-monitor keys install {os.path.basename(bundle)}")
+
+
+@keys_app.command("new-web-server")
+def keys_new_web_server(server_names: list[str] = typer.Argument(...),
+                        certs: str = typer.Option(None, "--certs"),
+                        out: str = typer.Option(None, "--out")) -> None:
+    """Issue a *server* certificate (HTTPS) for a web server's hostnames."""
+    from . import keys
+    d = certs or config.certs_dir()
+    where = keys.new_server(d, list(server_names), out_dir=out or os.path.join(d, "web-server"))
+    console.print(f"server.key / server.crt written to {where}; copy them to the web server's certs dir")
+
+
+@keys_app.command("install")
+def keys_install(bundle: str, certs: str = typer.Option(None, "--certs")) -> None:
+    """Unpack a client bundle into this box's certs directory."""
+    from . import keys
+    for p in keys.install_bundle(bundle, certs or config.certs_dir()):
+        console.print(f"  {p}")
+
+
+@keys_app.command("show")
+def keys_show(certs: str = typer.Option(None, "--certs")) -> None:
+    from . import keys
+    d = certs or config.certs_dir()
+    for f in ("ca.crt", "server.crt", "client.crt"):
+        p = os.path.join(d, f)
+        if os.path.exists(p):
+            console.print(f"[bold]{f}[/]\n" + "\n".join("  " + l for l in keys.describe(p).splitlines()))
+
+
+@keys_app.command("export-ca")
+def keys_export_ca(certs: str = typer.Option(None, "--certs")) -> None:
+    """Print the CA certificate (import it into browsers for HTTPS)."""
+    with open(os.path.join(certs or config.certs_dir(), "ca.crt")) as fh:
+        sys.stdout.write(fh.read())
+
+
+# ---------------------------------------------------------------------- #
+# users (web server)
+# ---------------------------------------------------------------------- #
+def _users():
+    from .web.users import Users
+    cfg = config.load("web")
+    return Users(os.path.join(cfg.data_dir, "users.db"))
+
+
+@users_app.command("list")
+def users_list() -> None:
+    t = Table("id", "name", "role", "disabled", "created")
+    for u in _users().list():
+        t.add_row(str(u["id"]), u["name"], u["role"], "yes" if u["disabled"] else "",
+                  u["created"][:19])
+    console.print(t)
+
+
+@users_app.command("add")
+def users_add(name: str, role: str = typer.Option("user", "--role"),
+              password: str = typer.Option(None, "--password", prompt=True, hide_input=True,
+                                           confirmation_prompt=True)) -> None:
+    _users().add(name, password, role)
+    console.print(f"added {role} [bold]{name}[/]")
+
+
+@users_app.command("passwd")
+def users_passwd(name: str, password: str = typer.Option(None, "--password", prompt=True,
+                                                          hide_input=True, confirmation_prompt=True)) -> None:
+    """Set a password (also how the admin password is reset)."""
+    _users().set_password(name, password)
+    console.print(f"password set for [bold]{name}[/]; existing sessions revoked")
+
+
+@users_app.command("del")
+def users_del(name: str, yes: bool = typer.Option(False, "--yes")) -> None:
+    if not yes and not typer.confirm(f"delete user {name} and all their profiles?"):
         raise typer.Exit(1)
+    _users().delete(name)
+    console.print(f"deleted [bold]{name}[/]")
+
+
+@users_app.command("disable")
+def users_disable(name: str, enable: bool = typer.Option(False, "--enable")) -> None:
+    _users().set_disabled(name, not enable)
+    console.print(f"{'enabled' if enable else 'disabled'} [bold]{name}[/]")
+
+
+@users_app.command("token")
+def users_token(name: str, label: str = typer.Option("cli", "--label")) -> None:
+    """Issue an API token for the TUI (shown once)."""
+    tok = _users().new_token(name, label)
+    console.print(f"token for {name} ({label}):\n\n  [bold]{tok}[/]\n\n"
+                  f"use:  health-monitor tui --token {tok}   or  HM_TOKEN=...")
+
+
+# ---------------------------------------------------------------------- #
+# gpus (monitor)
+# ---------------------------------------------------------------------- #
+def _registry():
+    from .identity import Registry
+    cfg = config.load("monitor")
+    return Registry(os.path.join(config.config_dir(), "gpus.json"), cfg.get("gpu_names") or {}), cfg
+
+
+@gpus_app.command("list")
+def gpus_list() -> None:
+    reg, _ = _registry()
+    t = Table("gpu_id", "name", "state", "vendor", "model", "serial", "pci", "note")
+    for c in reg.listing():
+        t.add_row(c["gpu_id"], c["name"], c["state"], c["vendor"], c["model"][:32],
+                  c["serial"] or "-", c["pci_addr"], c["note"])
+    console.print(t)
+
+
+@gpus_app.command("rename")
+def gpus_rename(gpu_id: str, name: str) -> None:
+    reg, cfg = _registry()
+    got = reg.rename(gpu_id, name)
+    names = dict(cfg.values.get("gpu_names") or {})
+    names[gpu_id] = name
+    cfg.values["gpu_names"] = names
+    cfg.save()
+    console.print(f"{gpu_id} is now [bold]{got}[/] (restart the monitor to apply)")
+
+
+@gpus_app.command("map")
+def gpus_map(gpu_id: str, pci_addr: str) -> None:
+    """Declare that the card at PCI_ADDR is GPU_ID (resolves a pending card)."""
+    reg, _ = _registry()
+    reg.remap(gpu_id, pci_addr)
+    console.print(f"{gpu_id} mapped to {pci_addr} (restart the monitor to apply)")
+
+
+@gpus_app.command("forget")
+def gpus_forget(gpu_id: str) -> None:
+    reg, _ = _registry()
+    reg.forget(gpu_id)
+    console.print(f"forgot {gpu_id}; it will be minted afresh if seen again")
+
+
+# ---------------------------------------------------------------------- #
+# config
+# ---------------------------------------------------------------------- #
+@config_app.command("show")
+def config_show(role: str) -> None:
+    cfg = config.load(role, create=False)
+    console.print(f"[bold]{cfg.path}[/]")
+    console.print_json(json.dumps(cfg.values))
+
+
+@config_app.command("set")
+def config_set(role: str, key: str, value: str) -> None:
+    """Set one value; JSON is accepted (lists, numbers, booleans)."""
+    cfg = config.load(role)
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        parsed = value
+    cfg.values[key] = parsed
+    cfg.save()
+    console.print(f"{role}.{key} = {parsed!r}  ({cfg.path})")
+
+
+@config_app.command("path")
+def config_path(role: str = typer.Argument("monitor")) -> None:
+    cfg = config.load(role)
+    console.print(f"config: {cfg.path}\ndata:   {cfg.data_dir}\ncerts:  {cfg.certs}")
 
 
 def main() -> None:
@@ -374,66 +324,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-# ---------------------------------------------------------------------- #
-# serve -- the monitoring server
-# ---------------------------------------------------------------------- #
-DEFAULT_DATA_DIR = os.path.expanduser("~/.hl-traf")
-
-
-@app.command(name="serve")
-def serve_cmd(
-    port: int = typer.Option(5678, "--port", "-p", help="TCP port to listen on."),
-    host: str = typer.Option("0.0.0.0", "--bind", help="Address to bind."),
-    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir",
-                                 help="Where the sample and profile databases live."),
-    vllm: list[str] = typer.Option([], "--vllm",
-                                   help="vLLM base URL to scrape; repeatable."),
-    replay: str = typer.Option(None, "--replay", metavar="PATH",
-                               help="Serve an archive read-only; no hardware is "
-                                    "touched and nothing is recorded."),
-    nic: bool = typer.Option(False, "--nic",
-                             help="Also poll the NIC fabric so the matrix "
-                                  "and table views work over JSON."),
-    nic_interval: float = typer.Option(0.5, "--nic-interval",
-                                       help="Seconds between fabric sweeps."),
-    log_file: str = typer.Option(None, "--log-file"),
-    verbose: bool = typer.Option(False, "-v", "--verbose"),
-) -> None:
-    """Run the HTTP server: JSON API for the TUI plus the web UI."""
-    from .serve import serve
-    setup_logging(verbose, log_file)
-    serve(host, port, data_dir, list(vllm), replay, nic, nic_interval)
-
-
-@app.command(name="serve-reset")
-def serve_reset_cmd(
-    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
-) -> None:
-    """Rotate the samples database and begin a fresh recording.
-
-    Nothing is deleted -- the rotated file stays readable and appears in
-    the UI's database switcher.
-    """
-    from .serve import reset
-    moved = reset(data_dir)
-    if moved:
-        console.print(f"rotated to [bold]{os.path.basename(moved)}[/]")
-        console.print("a fresh samples.db starts on the next 'serve'")
-    else:
-        console.print("nothing to rotate")
-
-
-@app.command(name="serve-list")
-def serve_list_cmd(
-    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
-) -> None:
-    """List the sample databases with their time extents."""
-    from .serve import describe
-    rows = describe(data_dir)
-    if not rows:
-        console.print(f"no databases in {data_dir}")
-        return
-    for line in rows:
-        console.print(line)

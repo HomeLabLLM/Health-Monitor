@@ -110,7 +110,9 @@ def _tune(conn: sqlite3.Connection, *, readonly: bool = False) -> None:
 def open_samples(path: str, *, create: bool = False) -> sqlite3.Connection:
     if not create and not os.path.exists(path):
         raise FileNotFoundError(path)
-    conn = sqlite3.connect(path, timeout=5.0, isolation_level=None)
+    # Stores are driven from run_in_executor threads; the owning classes
+    # serialise access with their own lock, so cross-thread use is safe.
+    conn = sqlite3.connect(path, timeout=5.0, isolation_level=None, check_same_thread=False)
     _tune(conn)
     conn.executescript(_SAMPLES_DDL)
     for table, _ in ROLLUPS:
@@ -123,7 +125,8 @@ def open_samples(path: str, *, create: bool = False) -> sqlite3.Connection:
 
 
 def open_samples_ro(path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0,
+                           check_same_thread=False)
     _tune(conn, readonly=True)
     return conn
 
@@ -180,7 +183,7 @@ def extent(conn: sqlite3.Connection) -> tuple[float | None, float | None]:
 
 def open_profiles(path: str) -> sqlite3.Connection:
     """Web-server side: per-user graph profiles."""
-    conn = sqlite3.connect(path, timeout=5.0, isolation_level=None)
+    conn = sqlite3.connect(path, timeout=5.0, isolation_level=None, check_same_thread=False)
     _tune(conn)
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS profiles (
