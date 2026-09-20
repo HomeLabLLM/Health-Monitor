@@ -162,7 +162,7 @@ hl-traf                         # matrix shows per-pair traffic on the wiring
 ## Layout
 
 ```
-hl_traf/
+health_monitor/
   hlml.py       ctypes bindings for libhlml.so (+ module IDs)
   poller.py     async per-GPU polling engine, rates, sparklines
   topology.py   wiring cache, sampler, correlation matcher,

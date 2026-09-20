@@ -1,4 +1,4 @@
-# hl-traf monitoring server + TUI
+# health-monitor monitoring server + TUI
 #
 # The venv is deliberately this app's own (.venvmonitor).  Do not point
 # any of this at ~/venv3 -- that is the vLLM environment and its torch
@@ -9,7 +9,7 @@ PY      := $(VENV)/bin/python
 PIP     := $(VENV)/bin/pip
 STAMP   := $(VENV)/.deps-installed
 PORT    ?= 5678
-DATADIR ?= $(HOME)/.hl-traf
+DATADIR ?= $(HOME)/.health-monitor
 VLLM    ?= http://127.0.0.1:8000
 
 # uv is not installed on this box; plain venv + pip is one less thing to
@@ -42,16 +42,16 @@ venv: $(STAMP)
 deps: $(STAMP)
 
 serve: $(STAMP)
-	@$(PY) -m hl_traf serve --port $(PORT) --data-dir $(DATADIR) --vllm $(VLLM)
+	@$(PY) -m health_monitor serve --port $(PORT) --data-dir $(DATADIR) --vllm $(VLLM)
 
 tui: $(STAMP)
-	@$(PY) -m hl_traf --server http://127.0.0.1:$(PORT)
+	@$(PY) -m health_monitor --server http://127.0.0.1:$(PORT)
 
 reset: $(STAMP)
-	@$(PY) -m hl_traf serve-reset --data-dir $(DATADIR)
+	@$(PY) -m health_monitor serve-reset --data-dir $(DATADIR)
 
 check: $(STAMP)
-	@$(PY) -m compileall -q hl_traf && echo "compile ok"
+	@$(PY) -m compileall -q health_monitor && echo "compile ok"
 
 clean:
 	rm -rf $(VENV)
