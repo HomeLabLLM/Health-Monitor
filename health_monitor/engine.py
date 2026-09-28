@@ -76,7 +76,8 @@ class Device:
 
 class Engine:
     def __init__(self, monitor_id: str, backends: list[Backend], registry: Registry,
-                 settings: Settings, vllm_urls: list[str] | None = None) -> None:
+                 settings: Settings, vllm_urls: list[str] | None = None,
+                 vllm_hbm_peak: float | None = None) -> None:
         self.monitor_id = monitor_id
         self.backends = backends
         self.registry = registry
@@ -85,7 +86,7 @@ class Engine:
         self.host_catalog: dict[str, Series] = {}
         self.scrapers = {vllm.tag_for(u): vllm.Scraper(u) for u in (vllm_urls or [])}
         for u in (vllm_urls or []):
-            for s in vllm.series_for(u):
+            for s in vllm.series_for(u, vllm_hbm_peak):
                 self.host_catalog[s.key] = s
         self.host_prefix = ref(monitor_id, HOST, "")
         from .metrics.derive import Deriver
@@ -370,4 +371,5 @@ def build(monitor_id: str, cfg: dict[str, Any], registry_path: str) -> Engine:
         log.warning("no GPU backends loaded on this box")
     registry = Registry(registry_path, cfg.get("gpu_names") or {})
     settings = Settings.from_dict(cfg)
-    return Engine(monitor_id, backends, registry, settings, list(cfg.get("vllm") or []))
+    return Engine(monitor_id, backends, registry, settings, list(cfg.get("vllm") or []),
+                  cfg.get("vllm_hbm_peak"))

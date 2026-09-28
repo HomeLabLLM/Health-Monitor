@@ -140,7 +140,14 @@ Measured on this fleet:
 | sim | — | 17 | a slow load cycle plus noise, stable serials, for testing a manager with N monitors |
 
 vLLM is host-level (`<monitor>/host/…`), scraped from `/metrics`, never
-from the log. Firmware mailboxes are serialised, so the engine reads only
+from the log. `generation` is the engine total; `decode per req`
+(1 / mean inter-token latency) is what one client sees, and `requests/s`
+counts completions. Labels ending `(estim)` are estimates, not
+measurements. HBM read/write come from vLLM's analytic model and stay
+empty until vLLM runs with `--enable-mfu-metrics`; set `vllm_hbm_peak`
+(bytes/s per GPU, `2.46e12` for Gaudi2) in `monitor.json` to add a
+percentage. Gaudi2 exposes no HBM bandwidth counter outside the profiler
+(`hl-smi`'s `utilization.memory` is capacity, not bandwidth). Firmware mailboxes are serialised, so the engine reads only
 the union of what is recorded (settings) and what any viewer is currently
 displaying — the subscription travels browser → web → manager → monitor.
 

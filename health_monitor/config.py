@@ -60,6 +60,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "outbox_max": "20G",              # absolute ("20G") or percent ("10%")
         "min_free": "2G",
         "vllm": [],                       # base URLs to scrape
+        "vllm_hbm_peak": None,            # bytes/s per GPU, e.g. 2.46e12 (Gaudi2); adds HBM %
         "backends": ["auto"],             # or an explicit list
         "sim_devices": 0,                 # >0 adds simulated GPUs
         "gpu_names": {},                  # gpu_id -> display name

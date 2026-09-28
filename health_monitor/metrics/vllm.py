@@ -41,6 +41,11 @@ class Scrape:
                 return val
         return None
 
+    def total(self, metric: str) -> float | None:
+        """Sum over every label set, e.g. request_success_total across finished_reason."""
+        got = self.labelled.get(f"vllm:{metric}")
+        return None if not got else sum(v for _, v in got)
+
 
 class Scraper:
     def __init__(self, url: str, timeout: float = 4.0) -> None:
@@ -114,16 +119,35 @@ def tag_for(url: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", host).strip("_")
 
 
-def series_for(url: str) -> list[Series]:
-    """Catalog for one endpoint.  Local keys are ``vllm.<tag>.<name>``."""
+def series_for(url: str, hbm_peak: float | None = None) -> list[Series]:
+    """Catalog for one endpoint.  Local keys are ``vllm.<tag>.<name>``.
+
+    `hbm_peak` (bytes/s per GPU) adds an HBM-bandwidth percentage series.
+    """
     tag = tag_for(url)
     v = f"vllm.{tag}"
     s = lambda **kw: Series(source="vllm", **kw)  # noqa: E731
     out = [
         s(key=f"{v}.gen_tps", label=f"{tag} generation", group="vllm.tput", unit=Unit.TOKPS,
-          kind=Kind.DERIVED, path="rate:generation_tokens_total"),
+          kind=Kind.DERIVED, path="rate:generation_tokens_total",
+          note="all requests together; see per-req series for what one client sees"),
+        s(key=f"{v}.gen_tps_per_req", label=f"{tag} generation per req (estim)", group="vllm.tput",
+          unit=Unit.TOKPS, kind=Kind.DERIVED, path="per:generation_tokens_total:num_requests_running",
+          note="generation / running requests; reads low while a request is still in prefill"),
+        s(key=f"{v}.decode_tps_per_req", label=f"{tag} decode per req", group="vllm.tput",
+          unit=Unit.TOKPS, kind=Kind.DERIVED, path="hinv:inter_token_latency_seconds",
+          note="1 / mean inter-token latency over the last minute; excludes prefill"),
         s(key=f"{v}.prompt_tps", label=f"{tag} prompt", group="vllm.tput", unit=Unit.TOKPS,
           kind=Kind.DERIVED, path="rate:prompt_tokens_total"),
+        s(key=f"{v}.req_rate", label=f"{tag} requests/s", group="vllm.queue", unit=Unit.COUNT,
+          kind=Kind.DERIVED, path="ratesum:request_success_total",
+          note="completed requests per second, every finished_reason"),
+        s(key=f"{v}.gen_per_req", label=f"{tag} gen tokens/req", group="vllm.batch",
+          unit=Unit.COUNT, kind=Kind.DERIVED, path="havg:request_generation_tokens",
+          note="mean over requests finished in the last minute"),
+        s(key=f"{v}.prompt_per_req", label=f"{tag} prompt tokens/req", group="vllm.batch",
+          unit=Unit.COUNT, kind=Kind.DERIVED, path="havg:request_prompt_tokens",
+          note="mean over requests finished in the last minute"),
         s(key=f"{v}.running", label=f"{tag} running reqs", group="vllm.queue", unit=Unit.COUNT,
           path="num_requests_running"),
         s(key=f"{v}.waiting", label=f"{tag} waiting reqs", group="vllm.queue", unit=Unit.COUNT,
@@ -146,6 +170,23 @@ def series_for(url: str) -> list[Series]:
           kind=Kind.DERIVED, path="havg:iteration_tokens_total",
           note="1.0 means no batching -- one token per engine step"),
     ]
+    # vLLM's analytic estimate (needs `vllm serve --enable-mfu-metrics`;
+    # None until then).  It models every layer as full attention, so hybrid
+    # linear-attention models overstate KV reads -- a trend line, not a gauge.
+    rd, wr = "estimated_read_bytes_per_gpu_total", "estimated_write_bytes_per_gpu_total"
+    mfu = "estimated by vLLM (--enable-mfu-metrics), not measured"
+    out += [
+        s(key=f"{v}.hbm_read", label=f"{tag} HBM read (estim)", group="vllm.hbm", unit=Unit.BPS,
+          kind=Kind.DERIVED, path=f"estrate:{rd}", note=mfu),
+        s(key=f"{v}.hbm_write", label=f"{tag} HBM write (estim)", group="vllm.hbm", unit=Unit.BPS,
+          kind=Kind.DERIVED, path=f"estrate:{wr}", note=mfu),
+        s(key=f"{v}.hbm_total", label=f"{tag} HBM read+write (estim)", group="vllm.hbm",
+          unit=Unit.BPS, kind=Kind.DERIVED, path=f"estrate:{rd}:{wr}", note=mfu),
+    ]
+    if hbm_peak:
+        out.append(s(key=f"{v}.hbm_pct", label=f"{tag} HBM bandwidth % (estim)", group="vllm.hbm",
+                     unit=Unit.PCT, kind=Kind.DERIVED, path=f"estrate:{rd}:{wr}",
+                     scale=100.0 / hbm_peak, note=f"{mfu}; of {hbm_peak / 1e12:g} TB/s peak"))
     for metric, label in (("time_to_first_token_seconds", "TTFT"),
                           ("inter_token_latency_seconds", "inter-token"),
                           ("e2e_request_latency_seconds", "e2e latency"),
@@ -164,5 +205,5 @@ def series_for(url: str) -> list[Series]:
 GROUP_LABELS = {
     "vllm.tput": "vLLM / Throughput", "vllm.queue": "vLLM / Queue",
     "vllm.cache": "vLLM / Cache", "vllm.latency": "vLLM / Latency",
-    "vllm.batch": "vLLM / Batch",
+    "vllm.batch": "vLLM / Batch", "vllm.hbm": "vLLM / HBM (estim)",
 }

@@ -103,11 +103,21 @@ class Deriver:
             return None
         prev = self._prev_scrape.get(tag)
         if op == "rate":
-            if prev is None:
+            return self._scrape_rate(prev, cur, prev and prev.get(args[0]), cur.get(args[0]))
+        if op == "ratesum":
+            return self._scrape_rate(prev, cur, prev and prev.total(args[0]), cur.total(args[0]))
+        if op == "per":
+            r = self._scrape_rate(prev, cur, prev and prev.get(args[0]), cur.get(args[0]))
+            n = cur.get(args[1])
+            return None if r is None or not n or n <= 0 else r / n
+        if op == "estrate":
+            # Sum of estimate counters.  A total still at 0 means the
+            # estimator is switched off, which is not the same as "0 B/s".
+            before = [prev and prev.get(a) for a in args]
+            now = [cur.get(a) for a in args]
+            if None in before or None in now or not sum(now):
                 return None
-            a, b = prev.get(args[0]), cur.get(args[0])
-            dt = cur.ts - prev.ts
-            return None if a is None or b is None or dt <= 0 or b < a else (b - a) / dt
+            return self._scrape_rate(prev, cur, sum(before), sum(now))
         if op == "ratio":
             a, b = cur.get(args[0]), cur.get(args[1])
             return None if a is None or not b else 100.0 * a / b
@@ -130,9 +140,27 @@ class Deriver:
                 return None
             dc = c1 - c0
             return None if dc <= 0 else (s1 - s0) / dc
+        if op == "hinv":
+            # count / sum over the window: the reciprocal of havg, e.g.
+            # inter-token latency -> tokens/s as one request sees it.
+            if base is None:
+                return None
+            s0, s1 = base.get(f"{args[0]}_sum"), cur.get(f"{args[0]}_sum")
+            c0, c1 = base.get(f"{args[0]}_count"), cur.get(f"{args[0]}_count")
+            if None in (s0, s1, c0, c1) or s1 < s0 or c1 < c0:
+                return None
+            ds = s1 - s0
+            return None if ds <= 0 else (c1 - c0) / ds
         if op == "hquant":
             return self._hist_quantile(args[0], float(args[1]), cur, base)
         return None
+
+    @staticmethod
+    def _scrape_rate(prev, cur, a: float | None, b: float | None) -> float | None:
+        if prev is None or a is None or b is None:
+            return None
+        dt = cur.ts - prev.ts
+        return None if dt <= 0 or b < a else (b - a) / dt
 
     def _baseline(self, tag: str, cur):
         ring = self._ring.get(tag)
