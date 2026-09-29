@@ -133,10 +133,12 @@ def series_for(url: str, hbm_peak: float | None = None) -> list[Series]:
           note="all requests together; see per-req series for what one client sees"),
         s(key=f"{v}.gen_tps_per_req", label=f"{tag} generation per req (estim)", group="vllm.tput",
           unit=Unit.TOKPS, kind=Kind.DERIVED, path="per:generation_tokens_total:num_requests_running",
-          note="generation / running requests; reads low while a request is still in prefill"),
+          note="generation / running requests; reads low while a request is still in prefill; "
+               "0 when idle"),
         s(key=f"{v}.decode_tps_per_req", label=f"{tag} decode per req", group="vllm.tput",
           unit=Unit.TOKPS, kind=Kind.DERIVED, path="hinv:inter_token_latency_seconds",
-          note="1 / mean inter-token latency over the last minute; excludes prefill"),
+          note="1 / mean inter-token latency over the last minute; excludes prefill; "
+               "0 when idle"),
         s(key=f"{v}.prompt_tps", label=f"{tag} prompt", group="vllm.tput", unit=Unit.TOKPS,
           kind=Kind.DERIVED, path="rate:prompt_tokens_total"),
         s(key=f"{v}.req_rate", label=f"{tag} requests/s", group="vllm.queue", unit=Unit.COUNT,

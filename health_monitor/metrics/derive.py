@@ -109,7 +109,12 @@ class Deriver:
         if op == "per":
             r = self._scrape_rate(prev, cur, prev and prev.get(args[0]), cur.get(args[0]))
             n = cur.get(args[1])
-            return None if r is None or not n or n <= 0 else r / n
+            if r is None or n is None:
+                return None
+            # Idle engine is 0 tok/s, not a gap.  Tokens with nothing
+            # running now came from a request that finished since the
+            # last scrape, so count it as one.
+            return r / max(n, 1.0)
         if op == "estrate":
             # Sum of estimate counters.  A total still at 0 means the
             # estimator is switched off, which is not the same as "0 B/s".
@@ -150,7 +155,8 @@ class Deriver:
             if None in (s0, s1, c0, c1) or s1 < s0 or c1 < c0:
                 return None
             ds = s1 - s0
-            return None if ds <= 0 else (c1 - c0) / ds
+            # Nothing observed in the window: the engine is up but idle.
+            return 0.0 if ds <= 0 else (c1 - c0) / ds
         if op == "hquant":
             return self._hist_quantile(args[0], float(args[1]), cur, base)
         return None
