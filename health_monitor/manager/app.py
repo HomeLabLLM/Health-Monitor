@@ -283,6 +283,8 @@ class ManagerApp:
         if time.time() - newest > 30:
             return
         for w in list(self.webs):
+            if w.ws is None:        # REST subscriber: nothing to push to
+                continue
             vals = {r[0]: r[2] for r in rows if r[1] == newest and r[0] in w.watched and r[2] is not None}
             if vals:
                 asyncio.get_running_loop().create_task(
@@ -291,6 +293,8 @@ class ManagerApp:
     def _broadcast_state(self, mid: str) -> None:
         state = self._monitor_info(mid)
         for w in list(self.webs):
+            if w.ws is None:
+                continue
             asyncio.get_running_loop().create_task(
                 self._ws_send(w.ws, proto.MONITOR_STATE, **state))
 
